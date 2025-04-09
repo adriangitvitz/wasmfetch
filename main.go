@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"syscall/js"
 )
 
@@ -101,6 +103,7 @@ func makeRequest(this js.Value, args []js.Value) interface{} {
 			url := args[0].String()
 			method := "GET"
 			headers := make(map[string]string)
+			var reqBody io.Reader
 
 			if len(args) > 1 && !args[1].IsNull() && !args[1].IsUndefined() {
 				config := args[1]
@@ -117,10 +120,42 @@ func makeRequest(this js.Value, args []js.Value) interface{} {
 						headers[name] = value
 					}
 				}
+
+				if bodyVal := config.Get("body"); !bodyVal.IsUndefined() && !bodyVal.IsNull() {
+					var body []byte
+					contentType := ""
+
+					for k, v := range headers {
+						if strings.ToLower(k) == "content-type" {
+							contentType = v
+							break
+						}
+					}
+
+					if bodyVal.Type() == js.TypeString {
+						body = []byte(bodyVal.String())
+						if contentType == "" {
+							contentType = "application/json"
+						}
+					} else if bodyVal.Type() == js.TypeObject {
+						jsonStr := js.Global().Get("JSON").Call("stringify", bodyVal).String()
+						body = []byte(jsonStr)
+						if contentType == "" {
+							contentType = "application/json"
+						}
+					}
+
+					if len(body) > 0 {
+						reqBody = bytes.NewBuffer(body)
+
+						if contentType != "" && headers["Content-Type"] == "" {
+							headers["Content-Type"] = contentType
+						}
+					}
+				}
 			}
 
-			// TODO: Accept Post body request
-			req, err := http.NewRequest(method, url, nil)
+			req, err := http.NewRequest(method, url, reqBody)
 			if err != nil {
 				errorObj := map[string]interface{}{
 					"error": "Failed to create request: " + err.Error(),
@@ -137,7 +172,7 @@ func makeRequest(this js.Value, args []js.Value) interface{} {
 			res, err := client.Do(req)
 			if err != nil {
 				errorObj := map[string]interface{}{
-					"error": "Failed to create request: " + err.Error(),
+					"error": "Failed to execute request: " + err.Error(),
 				}
 				reject.Invoke(js.ValueOf(errorObj))
 				return
@@ -148,7 +183,7 @@ func makeRequest(this js.Value, args []js.Value) interface{} {
 			body, err := io.ReadAll(res.Body)
 			if err != nil {
 				errorObj := map[string]interface{}{
-					"error": "Failed to create request: " + err.Error(),
+					"error": "Failed to read response body: " + err.Error(),
 				}
 				reject.Invoke(js.ValueOf(errorObj))
 				return
@@ -169,7 +204,7 @@ func makeRequest(this js.Value, args []js.Value) interface{} {
 			}
 
 			var jsonData interface{}
-			if err := json.Unmarshal(body, &jsonData); err != nil {
+			if err := json.Unmarshal(body, &jsonData); err == nil {
 				responseData.Data = jsonData
 			} else {
 				responseData.Data = string(body)
@@ -178,7 +213,7 @@ func makeRequest(this js.Value, args []js.Value) interface{} {
 			responseJSON, err := json.Marshal(responseData)
 			if err != nil {
 				errorObj := map[string]interface{}{
-					"error": "Failed to create request: " + err.Error(),
+					"error": "Failed to marshal response: " + err.Error(),
 				}
 				reject.Invoke(js.ValueOf(errorObj))
 				return
